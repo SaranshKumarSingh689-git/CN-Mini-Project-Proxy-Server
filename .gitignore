@@ -1,0 +1,17 @@
+# Compiled executables
+*.exe
+
+# Object files
+*.o
+*.obj
+
+# Runtime files
+logs/*.log
+cache/*
+
+# IDE files
+.vscode/
+.idea/
+
+# Windows files
+Thumbs.db
