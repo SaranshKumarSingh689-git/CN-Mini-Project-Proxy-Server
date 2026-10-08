@@ -223,7 +223,9 @@ int forward_http_request(
     int request_length;
     int bytes_received;
 
-    host_entry = gethostbyname(parsed_request->host);
+    host_entry = gethostbyname(
+        parsed_request->host
+    );
 
     if (host_entry == NULL)
     {
@@ -253,7 +255,9 @@ int forward_http_request(
         return -3;
     }
 
-    set_socket_timeouts(server_socket);
+    set_socket_timeouts(
+        server_socket
+    );
 
     memset(
         &server_address,
@@ -262,6 +266,7 @@ int forward_http_request(
     );
 
     server_address.sin_family = AF_INET;
+
     server_address.sin_port = htons(
         (u_short)parsed_request->port
     );
@@ -280,7 +285,23 @@ int forward_http_request(
         ) == SOCKET_ERROR
     )
     {
+        int error_code = WSAGetLastError();
+
         closesocket(server_socket);
+
+        if (
+            error_code == WSAETIMEDOUT ||
+            error_code == WSAEWOULDBLOCK
+        )
+        {
+            send_proxy_error(
+                client_socket,
+                504,
+                "Gateway Timeout"
+            );
+
+            return -4;
+        }
 
         send_proxy_error(
             client_socket,
@@ -288,7 +309,7 @@ int forward_http_request(
             "Bad Gateway"
         );
 
-        return -3;
+        return -5;
     }
 
     request_length = build_forward_request(
@@ -308,7 +329,7 @@ int forward_http_request(
             "Bad Request"
         );
 
-        return -4;
+        return -6;
     }
 
     if (
@@ -327,7 +348,7 @@ int forward_http_request(
             "Bad Gateway"
         );
 
-        return -5;
+        return -7;
     }
 
     while (1)
@@ -346,8 +367,25 @@ int forward_http_request(
 
         if (bytes_received == SOCKET_ERROR)
         {
+            int error_code = WSAGetLastError();
+
             closesocket(server_socket);
-            return -6;
+
+            if (
+                error_code == WSAETIMEDOUT ||
+                error_code == WSAEWOULDBLOCK
+            )
+            {
+                send_proxy_error(
+                    client_socket,
+                    504,
+                    "Gateway Timeout"
+                );
+
+                return -8;
+            }
+
+            return -9;
         }
 
         if (
@@ -359,7 +397,7 @@ int forward_http_request(
         )
         {
             closesocket(server_socket);
-            return -7;
+            return -10;
         }
     }
 

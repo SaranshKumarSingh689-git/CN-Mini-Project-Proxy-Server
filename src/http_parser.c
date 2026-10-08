@@ -6,11 +6,18 @@
 
 static int parse_host(
     const char *host_value,
-    char *host,
-    int *port
+    HttpRequest *parsed_request
 )
 {
     char host_copy[MAX_HOST_LENGTH];
+    char *colon;
+    char *end;
+    long port;
+
+    if (host_value == NULL || parsed_request == NULL)
+    {
+        return -1;
+    }
 
     strncpy(
         host_copy,
@@ -20,70 +27,92 @@ static int parse_host(
 
     host_copy[sizeof(host_copy) - 1] = '\0';
 
-    /*
-     * Remove trailing whitespace/newline.
-     */
-    char *newline = strpbrk(host_copy, "\r\n");
+    end = host_copy + strlen(host_copy);
 
-    if (newline != NULL)
+    while (
+        end > host_copy &&
+        (end[-1] == '\r' || end[-1] == '\n' || end[-1] == ' ')
+    )
     {
-        *newline = '\0';
+        end--;
+        *end = '\0';
     }
 
-    /*
-     * Check whether the Host header contains a port.
-     *
-     * Example:
-     *
-     * example.com
-     * example.com:8080
-     */
+    while (*host_copy == ' ')
+    {
+        memmove(
+            host_copy,
+            host_copy + 1,
+            strlen(host_copy)
+        );
+    }
 
-    char *colon = strchr(host_copy, ':');
+    if (host_copy[0] == '\0')
+    {
+        return -1;
+    }
+
+    colon = strrchr(host_copy, ':');
 
     if (colon != NULL)
     {
         *colon = '\0';
 
-        colon++;
-
-        int parsed_port = atoi(colon);
-
-        if (parsed_port <= 0 || parsed_port > 65535)
+        if (*(colon + 1) == '\0')
         {
             return -1;
         }
 
-        *port = parsed_port;
+        port = strtol(
+            colon + 1,
+            &end,
+            10
+        );
+
+        if (*end != '\0' || port < 1 || port > 65535)
+        {
+            return -1;
+        }
+
+        parsed_request->port = (int)port;
     }
     else
     {
-        *port = 80;
+        parsed_request->port = 80;
     }
 
-    if (strlen(host_copy) == 0)
+    if (host_copy[0] == '\0')
     {
         return -1;
     }
 
     strncpy(
-        host,
+        parsed_request->host,
         host_copy,
         MAX_HOST_LENGTH - 1
     );
 
-    host[MAX_HOST_LENGTH - 1] = '\0';
+    parsed_request->host[MAX_HOST_LENGTH - 1] = '\0';
 
     return 0;
 }
-
 
 int parse_http_request(
     const char *request,
     HttpRequest *parsed_request
 )
 {
-    if (request == NULL || parsed_request == NULL)
+    char method[MAX_METHOD_LENGTH];
+    char url[MAX_PATH_LENGTH];
+    char version[16];
+
+    const char *line_end;
+    const char *host_header;
+
+    if (
+        request == NULL ||
+        parsed_request == NULL
+    )
     {
         return -1;
     }
@@ -94,17 +123,7 @@ int parse_http_request(
         sizeof(HttpRequest)
     );
 
-    /*
-     * Find the first line.
-     *
-     * Example:
-     *
-     * GET http://example.com/ HTTP/1.1
-     */
-
-    char first_line[4096];
-
-    const char *line_end = strstr(
+    line_end = strstr(
         request,
         "\r\n"
     );
@@ -114,54 +133,32 @@ int parse_http_request(
         return -1;
     }
 
-    size_t line_length =
-        (size_t)(line_end - request);
-
-    if (line_length >= sizeof(first_line))
+    if (
+        sscanf(
+            request,
+            "%15s %2047s %15s",
+            method,
+            url,
+            version
+        ) != 3
+    )
     {
         return -1;
     }
 
-    memcpy(
-        first_line,
-        request,
-        line_length
-    );
-
-    first_line[line_length] = '\0';
-
-    /*
-     * Parse:
-     *
-     * METHOD URL HTTP_VERSION
-     */
-
-    char method[MAX_METHOD_LENGTH];
-    char url[2048];
-    char http_version[32];
-
-    int fields = sscanf(
-        first_line,
-        "%15s %2047s %31s",
-        method,
-        url,
-        http_version
-    );
-
-    if (fields != 3)
-    {
-        return -1;
-    }
-
-    /*
-     * Currently we support GET.
-     *
-     * Other methods can be added later if required.
-     */
-
-    if (strcmp(method, "GET") != 0)
+    if (
+        strcmp(method, "GET") != 0
+    )
     {
         return -2;
+    }
+
+    if (
+        strcmp(version, "HTTP/1.0") != 0 &&
+        strcmp(version, "HTTP/1.1") != 0
+    )
+    {
+        return -1;
     }
 
     strncpy(
@@ -174,94 +171,73 @@ int parse_http_request(
         MAX_METHOD_LENGTH - 1
     ] = '\0';
 
-
-    /*
-     * Extract path from URL.
-     *
-     * Proxy requests normally contain:
-     *
-     * http://example.com/path
-     */
-
-    char host_from_url[MAX_HOST_LENGTH];
-
-    memset(
-        host_from_url,
-        0,
-        sizeof(host_from_url)
-    );
-
-    if (strncmp(url, "http://", 7) == 0)
+    if (
+        strncmp(
+            url,
+            "http://",
+            7
+        ) == 0
+    )
     {
-        char *url_start = url + 7;
+        char url_copy[MAX_PATH_LENGTH];
+        char *host_start;
+        char *path_start;
 
-        char *path_start = strchr(
-            url_start,
+        strncpy(
+            url_copy,
+            url + 7,
+            sizeof(url_copy) - 1
+        );
+
+        url_copy[
+            sizeof(url_copy) - 1
+        ] = '\0';
+
+        host_start = url_copy;
+
+        path_start = strchr(
+            host_start,
             '/'
         );
 
         if (path_start != NULL)
         {
-            size_t host_length =
-                (size_t)(path_start - url_start);
-
-            if (host_length >= sizeof(host_from_url))
-            {
-                return -1;
-            }
-
-            memcpy(
-                host_from_url,
-                url_start,
-                host_length
-            );
-
-            host_from_url[host_length] = '\0';
-
             strncpy(
                 parsed_request->path,
                 path_start,
                 MAX_PATH_LENGTH - 1
             );
+
+            parsed_request->path[
+                MAX_PATH_LENGTH - 1
+            ] = '\0';
+
+            *path_start = '\0';
         }
         else
         {
-            strncpy(
-                host_from_url,
-                url_start,
-                sizeof(host_from_url) - 1
-            );
-
             strcpy(
                 parsed_request->path,
                 "/"
             );
         }
 
-        /*
-         * Parse host and optional port.
-         */
-
-        if (parse_host(
-                host_from_url,
-                parsed_request->host,
-                &parsed_request->port
-            ) != 0)
+        if (
+            parse_host(
+                host_start,
+                parsed_request
+            ) != 0
+        )
         {
             return -1;
         }
     }
     else
     {
-        /*
-         * Handle origin-form requests.
-         *
-         * Example:
-         *
-         * GET /index.html HTTP/1.1
-         *
-         * The actual host is obtained from the Host header.
-         */
+        if (url[0] != '/')
+        {
+            return -1;
+        }
 
         strncpy(
             parsed_request->path,
@@ -269,13 +245,21 @@ int parse_http_request(
             MAX_PATH_LENGTH - 1
         );
 
-        const char *host_header =
-            strstr(request, "\r\nHost:");
+        parsed_request->path[
+            MAX_PATH_LENGTH - 1
+        ] = '\0';
+
+        host_header = strstr(
+            request,
+            "\r\nHost:"
+        );
 
         if (host_header == NULL)
         {
-            host_header =
-                strstr(request, "\nhost:");
+            host_header = strstr(
+                request,
+                "\r\nhost:"
+            );
         }
 
         if (host_header == NULL)
@@ -283,29 +267,75 @@ int parse_http_request(
             return -1;
         }
 
-        const char *host_value =
-            strchr(host_header, ':');
+        host_header += 7;
 
-        if (host_value == NULL)
+        while (*host_header == ' ')
         {
-            return -1;
+            host_header++;
         }
 
-        host_value++;
-
-        while (*host_value == ' ')
         {
-            host_value++;
-        }
+            char host_value[MAX_HOST_LENGTH];
+            const char *header_end;
+            int length;
 
-        if (parse_host(
+            header_end = strstr(
+                host_header,
+                "\r\n"
+            );
+
+            if (header_end == NULL)
+            {
+                return -1;
+            }
+
+            length = (int)(
+                header_end - host_header
+            );
+
+            if (
+                length <= 0 ||
+                length >= MAX_HOST_LENGTH
+            )
+            {
+                return -1;
+            }
+
+            memcpy(
                 host_value,
-                parsed_request->host,
-                &parsed_request->port
-            ) != 0)
-        {
-            return -1;
+                host_header,
+                length
+            );
+
+            host_value[length] = '\0';
+
+            if (
+                parse_host(
+                    host_value,
+                    parsed_request
+                ) != 0
+            )
+            {
+                return -1;
+            }
         }
+    }
+
+    if (
+        parsed_request->host[0] == '\0'
+    )
+    {
+        return -1;
+    }
+
+    if (
+        parsed_request->path[0] == '\0'
+    )
+    {
+        strcpy(
+            parsed_request->path,
+            "/"
+        );
     }
 
     return 0;
