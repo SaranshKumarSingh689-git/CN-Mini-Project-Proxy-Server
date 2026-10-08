@@ -1,118 +1,117 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
 #include "http_parser.h"
-
-#pragma comment(lib, "ws2_32.lib")
+#include "forwarder.h"
 
 #define PROXY_PORT 8080
 #define BACKLOG 10
+#define CLIENT_BUFFER_SIZE MAX_HTTP_REQUEST
+
+static void send_error_response(
+    SOCKET client_socket,
+    int status_code,
+    const char *status_text,
+    const char *message
+)
+{
+    char response[1024];
+
+    int message_length = (int)strlen(message);
+
+    int response_length = snprintf(
+        response,
+        sizeof(response),
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "%s",
+        status_code,
+        status_text,
+        message_length,
+        message
+    );
+
+    if (response_length > 0)
+    {
+        send(
+            client_socket,
+            response,
+            response_length,
+            0
+        );
+    }
+}
 
 int main(void)
 {
-    WSADATA wsaData;
+    WSADATA wsa_data;
 
-    SOCKET serverSocket = INVALID_SOCKET;
-    SOCKET clientSocket = INVALID_SOCKET;
+    SOCKET server_socket;
+    SOCKET client_socket;
 
-    struct sockaddr_in serverAddress;
-    struct sockaddr_in clientAddress;
+    struct sockaddr_in server_address;
+    struct sockaddr_in client_address;
 
-    int clientAddressLength =
-        sizeof(clientAddress);
+    int client_address_length;
 
-    /*
-     * Initialize Winsock.
-     */
+    char request_buffer[CLIENT_BUFFER_SIZE];
+    int bytes_received;
 
-    int result = WSAStartup(
-        MAKEWORD(2, 2),
-        &wsaData
-    );
-
-    if (result != 0)
+    if (
+        WSAStartup(
+            MAKEWORD(2, 2),
+            &wsa_data
+        ) != 0
+    )
     {
-        printf(
-            "WSAStartup failed. Error: %d\n",
-            result
-        );
-
+        printf("WSAStartup failed.\n");
         return 1;
     }
 
-    printf(
-        "Winsock initialized successfully.\n"
-    );
+    printf("Winsock initialized successfully.\n");
 
-
-    /*
-     * Create TCP socket.
-     */
-
-    serverSocket = socket(
+    server_socket = socket(
         AF_INET,
         SOCK_STREAM,
         IPPROTO_TCP
     );
 
-    if (serverSocket == INVALID_SOCKET)
+    if (server_socket == INVALID_SOCKET)
     {
-        printf(
-            "Socket creation failed. Error: %d\n",
-            WSAGetLastError()
-        );
-
+        printf("Socket creation failed.\n");
         WSACleanup();
-
         return 1;
     }
 
-    printf(
-        "TCP socket created successfully.\n"
-    );
-
-
-    /*
-     * Configure server address.
-     */
+    printf("TCP socket created successfully.\n");
 
     memset(
-        &serverAddress,
+        &server_address,
         0,
-        sizeof(serverAddress)
+        sizeof(server_address)
     );
 
-    serverAddress.sin_family = AF_INET;
+    server_address.sin_family = AF_INET;
+    server_address.sin_addr.s_addr = INADDR_ANY;
+    server_address.sin_port = htons(PROXY_PORT);
 
-    serverAddress.sin_addr.s_addr =
-        htonl(INADDR_ANY);
-
-    serverAddress.sin_port =
-        htons(PROXY_PORT);
-
-
-    /*
-     * Bind socket.
-     */
-
-    result = bind(
-        serverSocket,
-        (struct sockaddr *)&serverAddress,
-        sizeof(serverAddress)
-    );
-
-    if (result == SOCKET_ERROR)
+    if (
+        bind(
+            server_socket,
+            (struct sockaddr *)&server_address,
+            sizeof(server_address)
+        ) == SOCKET_ERROR
+    )
     {
-        printf(
-            "Bind failed. Error: %d\n",
-            WSAGetLastError()
-        );
+        printf("Bind failed.\n");
 
-        closesocket(serverSocket);
+        closesocket(server_socket);
         WSACleanup();
 
         return 1;
@@ -123,262 +122,172 @@ int main(void)
         PROXY_PORT
     );
 
-
-    /*
-     * Start listening.
-     */
-
-    result = listen(
-        serverSocket,
-        BACKLOG
-    );
-
-    if (result == SOCKET_ERROR)
+    if (
+        listen(
+            server_socket,
+            BACKLOG
+        ) == SOCKET_ERROR
+    )
     {
-        printf(
-            "Listen failed. Error: %d\n",
-            WSAGetLastError()
-        );
+        printf("Listen failed.\n");
 
-        closesocket(serverSocket);
+        closesocket(server_socket);
         WSACleanup();
 
         return 1;
     }
 
-    printf(
-        "Proxy server is listening...\n"
-    );
-
-    printf(
-        "Waiting for client connections...\n\n"
-    );
-
-
-    /*
-     * Accept clients.
-     */
+    printf("Proxy server is listening...\n");
 
     while (1)
     {
-        clientSocket = accept(
-            serverSocket,
-            (struct sockaddr *)&clientAddress,
-            &clientAddressLength
+        client_address_length =
+            sizeof(client_address);
+
+        client_socket = accept(
+            server_socket,
+            (struct sockaddr *)&client_address,
+            &client_address_length
         );
 
-        if (clientSocket == INVALID_SOCKET)
+        if (client_socket == INVALID_SOCKET)
         {
-            printf(
-                "Accept failed. Error: %d\n",
-                WSAGetLastError()
-            );
-
+            printf("Accept failed.\n");
             continue;
         }
-
 
         printf(
             "Client connected: %s:%d\n",
-            inet_ntoa(
-                clientAddress.sin_addr
-            ),
-            ntohs(
-                clientAddress.sin_port
-            )
+            inet_ntoa(client_address.sin_addr),
+            ntohs(client_address.sin_port)
         );
 
+        {
+            int timeout = 10000;
 
-        /*
-         * Receive HTTP request.
-         */
+            setsockopt(
+                client_socket,
+                SOL_SOCKET,
+                SO_RCVTIMEO,
+                (const char *)&timeout,
+                sizeof(timeout)
+            );
 
-        char requestBuffer[MAX_HTTP_REQUEST];
+            setsockopt(
+                client_socket,
+                SOL_SOCKET,
+                SO_SNDTIMEO,
+                (const char *)&timeout,
+                sizeof(timeout)
+            );
+        }
 
-        memset(
-            requestBuffer,
-            0,
-            sizeof(requestBuffer)
-        );
-
-        int bytesReceived = recv(
-            clientSocket,
-            requestBuffer,
-            sizeof(requestBuffer) - 1,
+        bytes_received = recv(
+            client_socket,
+            request_buffer,
+            sizeof(request_buffer) - 1,
             0
         );
 
-        if (bytesReceived == SOCKET_ERROR)
+        if (bytes_received <= 0)
         {
+            printf("Failed to receive request.\n");
+
+            closesocket(client_socket);
+            continue;
+        }
+
+        request_buffer[bytes_received] = '\0';
+
+        printf(
+            "----- HTTP REQUEST -----\n%s"
+            "------------------------\n",
+            request_buffer
+        );
+
+        {
+            HttpRequest parsed_request;
+
+            int parse_result =
+                parse_http_request(
+                    request_buffer,
+                    &parsed_request
+                );
+
+            if (parse_result == -1)
+            {
+                printf("Malformed HTTP request.\n");
+
+                send_error_response(
+                    client_socket,
+                    400,
+                    "Bad Request",
+                    "Malformed HTTP request.\r\n"
+                );
+
+                closesocket(client_socket);
+                continue;
+            }
+
+            if (parse_result == -2)
+            {
+                printf("Unsupported HTTP method.\n");
+
+                send_error_response(
+                    client_socket,
+                    501,
+                    "Not Implemented",
+                    "Only GET requests are supported.\r\n"
+                );
+
+                closesocket(client_socket);
+                continue;
+            }
+
             printf(
-                "Receive failed. Error: %d\n",
-                WSAGetLastError()
+                "===== PARSED REQUEST =====\n"
+                "Method : %s\n"
+                "Host   : %s\n"
+                "Port   : %d\n"
+                "Path   : %s\n"
+                "==========================\n",
+                parsed_request.method,
+                parsed_request.host,
+                parsed_request.port,
+                parsed_request.path
             );
 
-            closesocket(clientSocket);
+            {
+                int forward_result =
+                    forward_http_request(
+                        client_socket,
+                        request_buffer,
+                        &parsed_request
+                    );
 
-            continue;
+                if (forward_result == 0)
+                {
+                    printf(
+                        "HTTP response forwarded successfully.\n"
+                    );
+                }
+                else
+                {
+                    printf(
+                        "HTTP forwarding failed. Error: %d\n",
+                        forward_result
+                    );
+                }
+            }
         }
 
-        if (bytesReceived == 0)
-        {
-            printf(
-                "Client closed connection.\n"
-            );
+        closesocket(client_socket);
 
-            closesocket(clientSocket);
-
-            continue;
-        }
-
-        requestBuffer[bytesReceived] = '\0';
-
-
-        printf(
-            "\n----- HTTP REQUEST -----\n"
-        );
-
-        printf(
-            "%s\n",
-            requestBuffer
-        );
-
-        printf(
-            "------------------------\n"
-        );
-
-
-        /*
-         * Parse HTTP request.
-         */
-
-        HttpRequest parsedRequest;
-
-        int parseResult =
-            parse_http_request(
-                requestBuffer,
-                &parsedRequest
-            );
-
-
-        if (parseResult == -1)
-        {
-            const char *response =
-                "HTTP/1.1 400 Bad Request\r\n"
-                "Content-Type: text/plain\r\n"
-                "Content-Length: 16\r\n"
-                "Connection: close\r\n"
-                "\r\n"
-                "Bad HTTP request";
-
-            send(
-                clientSocket,
-                response,
-                (int)strlen(response),
-                0
-            );
-
-            closesocket(clientSocket);
-
-            continue;
-        }
-
-
-        if (parseResult == -2)
-        {
-            const char *response =
-                "HTTP/1.1 501 Not Implemented\r\n"
-                "Content-Type: text/plain\r\n"
-                "Content-Length: 22\r\n"
-                "Connection: close\r\n"
-                "\r\n"
-                "Method not supported";
-
-            send(
-                clientSocket,
-                response,
-                (int)strlen(response),
-                0
-            );
-
-            closesocket(clientSocket);
-
-            continue;
-        }
-
-
-        /*
-         * Display parsed request.
-         */
-
-        printf(
-            "\n===== PARSED REQUEST =====\n"
-        );
-
-        printf(
-            "Method : %s\n",
-            parsedRequest.method
-        );
-
-        printf(
-            "Host   : %s\n",
-            parsedRequest.host
-        );
-
-        printf(
-            "Port   : %d\n",
-            parsedRequest.port
-        );
-
-        printf(
-            "Path   : %s\n",
-            parsedRequest.path
-        );
-
-        printf(
-            "==========================\n\n"
-        );
-        /*
-         * Temporary response.
-         *
-         * Actual forwarding will be implemented
-         * in the next stage.
-         */
-        const char *body =
-            "HTTP request parsed successfully.\n";
-
-        char response[512];
-
-        snprintf(
-            response,
-            sizeof(response),
-
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/plain\r\n"
-            "Content-Length: %d\r\n"
-            "Connection: close\r\n"
-            "\r\n"
-            "%s",
-
-            (int)strlen(body),
-            body
-        );
-        send(
-            clientSocket,
-            response,
-            (int)strlen(response),
-            0
-        );
-        closesocket(clientSocket);
-
-        printf(
-            "Client connection closed.\n\n"
-        );
+        printf("Client connection closed.\n");
     }
-    /*
-     * Cleanup.
-     */
-    closesocket(serverSocket);
+
+    closesocket(server_socket);
     WSACleanup();
+
     return 0;
 }

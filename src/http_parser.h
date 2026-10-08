@@ -12,9 +12,11 @@ typedef struct
     char host[MAX_HOST_LENGTH];
     int port;
     char path[MAX_PATH_LENGTH];
-
 } HttpRequest;
 
-int parse_http_request(const char *request, HttpRequest *parsed_request);
+int parse_http_request(
+    const char *request,
+    HttpRequest *parsed_request
+);
 
 #endif
