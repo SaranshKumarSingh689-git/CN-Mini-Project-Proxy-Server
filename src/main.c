@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <process.h>
+#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
@@ -10,6 +12,13 @@
 #define PROXY_PORT 8080
 #define BACKLOG 10
 #define CLIENT_BUFFER_SIZE MAX_HTTP_REQUEST
+#define CLIENT_TIMEOUT_MS 10000
+
+typedef struct
+{
+    SOCKET client_socket;
+    struct sockaddr_in client_address;
+} ClientContext;
 
 static void send_error_response(
     SOCKET client_socket,
@@ -48,20 +57,161 @@ static void send_error_response(
     }
 }
 
+static void set_client_timeout(SOCKET client_socket)
+{
+    int timeout = CLIENT_TIMEOUT_MS;
+
+    setsockopt(
+        client_socket,
+        SOL_SOCKET,
+        SO_RCVTIMEO,
+        (const char *)&timeout,
+        sizeof(timeout)
+    );
+
+    setsockopt(
+        client_socket,
+        SOL_SOCKET,
+        SO_SNDTIMEO,
+        (const char *)&timeout,
+        sizeof(timeout)
+    );
+}
+
+static unsigned __stdcall handle_client(void *arg)
+{
+    ClientContext *context;
+    SOCKET client_socket;
+
+    char request_buffer[CLIENT_BUFFER_SIZE];
+
+    int bytes_received;
+    int parse_result;
+    int forward_result;
+
+    HttpRequest parsed_request;
+
+    context = (ClientContext *)arg;
+    client_socket = context->client_socket;
+
+    printf(
+        "Client connected: %s:%d\n",
+        inet_ntoa(context->client_address.sin_addr),
+        ntohs(context->client_address.sin_port)
+    );
+
+    free(context);
+
+    set_client_timeout(client_socket);
+
+    bytes_received = recv(
+        client_socket,
+        request_buffer,
+        sizeof(request_buffer) - 1,
+        0
+    );
+
+    if (bytes_received <= 0)
+    {
+        printf("Failed to receive request.\n");
+
+        closesocket(client_socket);
+        return 0;
+    }
+
+    request_buffer[bytes_received] = '\0';
+
+    printf(
+        "----- HTTP REQUEST -----\n%s"
+        "------------------------\n",
+        request_buffer
+    );
+
+    parse_result = parse_http_request(
+        request_buffer,
+        &parsed_request
+    );
+
+    if (parse_result == -1)
+    {
+        printf("Malformed HTTP request.\n");
+
+        send_error_response(
+            client_socket,
+            400,
+            "Bad Request",
+            "Malformed HTTP request.\r\n"
+        );
+
+        closesocket(client_socket);
+        return 0;
+    }
+
+    if (parse_result == -2)
+    {
+        printf("Unsupported HTTP method.\n");
+
+        send_error_response(
+            client_socket,
+            501,
+            "Not Implemented",
+            "Only GET requests are supported.\r\n"
+        );
+
+        closesocket(client_socket);
+        return 0;
+    }
+
+    printf(
+        "===== PARSED REQUEST =====\n"
+        "Method : %s\n"
+        "Host   : %s\n"
+        "Port   : %d\n"
+        "Path   : %s\n"
+        "==========================\n",
+        parsed_request.method,
+        parsed_request.host,
+        parsed_request.port,
+        parsed_request.path
+    );
+
+    forward_result = forward_http_request(
+        client_socket,
+        request_buffer,
+        &parsed_request
+    );
+
+    if (forward_result == 0)
+    {
+        printf(
+            "HTTP response forwarded successfully.\n"
+        );
+    }
+    else
+    {
+        printf(
+            "HTTP forwarding failed. Error: %d\n",
+            forward_result
+        );
+    }
+
+    closesocket(client_socket);
+
+    printf("Client connection closed.\n");
+
+    return 0;
+}
+
 int main(void)
 {
     WSADATA wsa_data;
 
     SOCKET server_socket;
-    SOCKET client_socket;
 
     struct sockaddr_in server_address;
     struct sockaddr_in client_address;
 
     int client_address_length;
-
-    char request_buffer[CLIENT_BUFFER_SIZE];
-    int bytes_received;
 
     if (
         WSAStartup(
@@ -85,6 +235,7 @@ int main(void)
     if (server_socket == INVALID_SOCKET)
     {
         printf("Socket creation failed.\n");
+
         WSACleanup();
         return 1;
     }
@@ -141,6 +292,10 @@ int main(void)
 
     while (1)
     {
+        SOCKET client_socket;
+        ClientContext *context;
+        unsigned thread_handle;
+
         client_address_length =
             sizeof(client_address);
 
@@ -156,134 +311,43 @@ int main(void)
             continue;
         }
 
-        printf(
-            "Client connected: %s:%d\n",
-            inet_ntoa(client_address.sin_addr),
-            ntohs(client_address.sin_port)
+        context = (ClientContext *)malloc(
+            sizeof(ClientContext)
         );
 
+        if (context == NULL)
         {
-            int timeout = 10000;
-
-            setsockopt(
-                client_socket,
-                SOL_SOCKET,
-                SO_RCVTIMEO,
-                (const char *)&timeout,
-                sizeof(timeout)
-            );
-
-            setsockopt(
-                client_socket,
-                SOL_SOCKET,
-                SO_SNDTIMEO,
-                (const char *)&timeout,
-                sizeof(timeout)
-            );
-        }
-
-        bytes_received = recv(
-            client_socket,
-            request_buffer,
-            sizeof(request_buffer) - 1,
-            0
-        );
-
-        if (bytes_received <= 0)
-        {
-            printf("Failed to receive request.\n");
+            printf("Memory allocation failed.\n");
 
             closesocket(client_socket);
             continue;
         }
 
-        request_buffer[bytes_received] = '\0';
+        context->client_socket = client_socket;
+        context->client_address = client_address;
 
-        printf(
-            "----- HTTP REQUEST -----\n%s"
-            "------------------------\n",
-            request_buffer
+        thread_handle = _beginthreadex(
+            NULL,
+            0,
+            handle_client,
+            context,
+            0,
+            NULL
         );
 
+        if (thread_handle == 0)
         {
-            HttpRequest parsed_request;
+            printf("Thread creation failed.\n");
 
-            int parse_result =
-                parse_http_request(
-                    request_buffer,
-                    &parsed_request
-                );
+            free(context);
+            closesocket(client_socket);
 
-            if (parse_result == -1)
-            {
-                printf("Malformed HTTP request.\n");
-
-                send_error_response(
-                    client_socket,
-                    400,
-                    "Bad Request",
-                    "Malformed HTTP request.\r\n"
-                );
-
-                closesocket(client_socket);
-                continue;
-            }
-
-            if (parse_result == -2)
-            {
-                printf("Unsupported HTTP method.\n");
-
-                send_error_response(
-                    client_socket,
-                    501,
-                    "Not Implemented",
-                    "Only GET requests are supported.\r\n"
-                );
-
-                closesocket(client_socket);
-                continue;
-            }
-
-            printf(
-                "===== PARSED REQUEST =====\n"
-                "Method : %s\n"
-                "Host   : %s\n"
-                "Port   : %d\n"
-                "Path   : %s\n"
-                "==========================\n",
-                parsed_request.method,
-                parsed_request.host,
-                parsed_request.port,
-                parsed_request.path
-            );
-
-            {
-                int forward_result =
-                    forward_http_request(
-                        client_socket,
-                        request_buffer,
-                        &parsed_request
-                    );
-
-                if (forward_result == 0)
-                {
-                    printf(
-                        "HTTP response forwarded successfully.\n"
-                    );
-                }
-                else
-                {
-                    printf(
-                        "HTTP forwarding failed. Error: %d\n",
-                        forward_result
-                    );
-                }
-            }
+            continue;
         }
 
-        closesocket(client_socket);
-
-        printf("Client connection closed.\n");
+        CloseHandle(
+            (HANDLE)thread_handle
+        );
     }
 
     closesocket(server_socket);
