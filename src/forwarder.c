@@ -4,12 +4,18 @@
 #include <winsock2.h>
 
 #include "forwarder.h"
+#include "cache.h"
 
 #define FORWARD_BUFFER_SIZE 8192
 #define MAX_FORWARD_REQUEST 16384
+#define MAX_CACHED_RESPONSE (10 * 1024 * 1024)
 #define CONNECTION_TIMEOUT_MS 10000
 
-static int send_all(SOCKET socket, const char *data, int length)
+static int send_all(
+    SOCKET socket,
+    const char *data,
+    int length
+)
 {
     int total_sent = 0;
 
@@ -33,7 +39,9 @@ static int send_all(SOCKET socket, const char *data, int length)
     return 0;
 }
 
-static void set_socket_timeouts(SOCKET socket)
+static void set_socket_timeouts(
+    SOCKET socket
+)
 {
     int timeout = CONNECTION_TIMEOUT_MS;
 
@@ -62,8 +70,7 @@ static void send_proxy_error(
 {
     char response[1024];
 
-    const char *body =
-        "Proxy error.\r\n";
+    const char *body = "Proxy error.\r\n";
 
     int body_length = (int)strlen(body);
 
@@ -106,7 +113,10 @@ static int build_forward_request(
     char headers[12000];
     int headers_length = 0;
 
-    line_end = strstr(original_request, "\r\n");
+    line_end = strstr(
+        original_request,
+        "\r\n"
+    );
 
     if (line_end == NULL)
     {
@@ -115,7 +125,10 @@ static int build_forward_request(
 
     headers_start = line_end + 2;
 
-    headers_end = strstr(headers_start, "\r\n\r\n");
+    headers_end = strstr(
+        headers_start,
+        "\r\n\r\n"
+    );
 
     if (headers_end == NULL)
     {
@@ -127,24 +140,48 @@ static int build_forward_request(
 
         while (current < headers_end)
         {
-            const char *next = strstr(current, "\r\n");
+            const char *next = strstr(
+                current,
+                "\r\n"
+            );
 
-            if (next == NULL || next > headers_end)
+            if (
+                next == NULL ||
+                next > headers_end
+            )
             {
                 break;
             }
 
             {
-                int line_length = (int)(next - current);
+                int line_length =
+                    (int)(next - current);
 
                 if (
                     line_length > 0 &&
-                    strncmp(current, "Proxy-Connection:", 18) != 0 &&
-                    strncmp(current, "Connection:", 11) != 0 &&
-                    strncmp(current, "Keep-Alive:", 11) != 0
+                    strncmp(
+                        current,
+                        "Proxy-Connection:",
+                        18
+                    ) != 0 &&
+                    strncmp(
+                        current,
+                        "Connection:",
+                        11
+                    ) != 0 &&
+                    strncmp(
+                        current,
+                        "Keep-Alive:",
+                        11
+                    ) != 0
                 )
                 {
-                    if (headers_length + line_length + 2 >= (int)sizeof(headers))
+                    if (
+                        headers_length +
+                        line_length +
+                        2 >=
+                        (int)sizeof(headers)
+                    )
                     {
                         return -1;
                     }
@@ -177,12 +214,19 @@ static int build_forward_request(
             parsed_request->path
         );
 
-        if (required_size < 0 || required_size >= buffer_size)
+        if (
+            required_size < 0 ||
+            required_size >= buffer_size
+        )
         {
             return -1;
         }
 
-        if (required_size + headers_length + 22 >= buffer_size)
+        if (
+            required_size +
+            headers_length +
+            22 >= buffer_size
+        )
         {
             return -1;
         }
@@ -220,8 +264,12 @@ int forward_http_request(
     char forward_request[MAX_FORWARD_REQUEST];
     char buffer[FORWARD_BUFFER_SIZE];
 
+    char *cached_response = NULL;
+
     int request_length;
     int bytes_received;
+
+    int cached_length = 0;
 
     host_entry = gethostbyname(
         parsed_request->host
@@ -285,7 +333,8 @@ int forward_http_request(
         ) == SOCKET_ERROR
     )
     {
-        int error_code = WSAGetLastError();
+        int error_code =
+            WSAGetLastError();
 
         closesocket(server_socket);
 
@@ -351,6 +400,11 @@ int forward_http_request(
         return -7;
     }
 
+    cached_response =
+        (char *)malloc(
+            MAX_CACHED_RESPONSE
+        );
+
     while (1)
     {
         bytes_received = recv(
@@ -367,9 +421,12 @@ int forward_http_request(
 
         if (bytes_received == SOCKET_ERROR)
         {
-            int error_code = WSAGetLastError();
+            int error_code =
+                WSAGetLastError();
 
             closesocket(server_socket);
+
+            free(cached_response);
 
             if (
                 error_code == WSAETIMEDOUT ||
@@ -397,11 +454,59 @@ int forward_http_request(
         )
         {
             closesocket(server_socket);
+
+            free(cached_response);
+
             return -10;
+        }
+
+        if (
+            cached_response != NULL &&
+            cached_length +
+            bytes_received <=
+            MAX_CACHED_RESPONSE
+        )
+        {
+            memcpy(
+                cached_response + cached_length,
+                buffer,
+                bytes_received
+            );
+
+            cached_length += bytes_received;
+        }
+        else
+        {
+            free(cached_response);
+            cached_response = NULL;
         }
     }
 
     closesocket(server_socket);
+
+    if (
+        cached_response != NULL &&
+        cached_length > 0
+    )
+    {
+        if (
+            cached_response[0] == 'H' &&
+            cached_response[1] == 'T' &&
+            cached_response[2] == 'T' &&
+            cached_response[3] == 'P'
+        )
+        {
+            cache_store(
+                parsed_request->host,
+                parsed_request->port,
+                parsed_request->path,
+                cached_response,
+                cached_length
+            );
+        }
+
+        free(cached_response);
+    }
 
     return 0;
 }

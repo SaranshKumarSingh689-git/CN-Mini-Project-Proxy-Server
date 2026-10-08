@@ -8,6 +8,7 @@
 
 #include "http_parser.h"
 #include "forwarder.h"
+#include "cache.h"
 
 #define PROXY_PORT 8080
 #define BACKLOG 10
@@ -57,7 +58,9 @@ static void send_error_response(
     }
 }
 
-static void set_client_timeout(SOCKET client_socket)
+static void set_client_timeout(
+    SOCKET client_socket
+)
 {
     int timeout = CLIENT_TIMEOUT_MS;
 
@@ -78,7 +81,9 @@ static void set_client_timeout(SOCKET client_socket)
     );
 }
 
-static unsigned __stdcall handle_client(void *arg)
+static unsigned __stdcall handle_client(
+    void *arg
+)
 {
     ClientContext *context;
     SOCKET client_socket;
@@ -88,6 +93,7 @@ static unsigned __stdcall handle_client(void *arg)
     int bytes_received;
     int parse_result;
     int forward_result;
+    int cache_result;
 
     HttpRequest parsed_request;
 
@@ -96,8 +102,12 @@ static unsigned __stdcall handle_client(void *arg)
 
     printf(
         "Client connected: %s:%d\n",
-        inet_ntoa(context->client_address.sin_addr),
-        ntohs(context->client_address.sin_port)
+        inet_ntoa(
+            context->client_address.sin_addr
+        ),
+        ntohs(
+            context->client_address.sin_port
+        )
     );
 
     free(context);
@@ -113,9 +123,12 @@ static unsigned __stdcall handle_client(void *arg)
 
     if (bytes_received <= 0)
     {
-        printf("Failed to receive request.\n");
+        printf(
+            "Failed to receive request.\n"
+        );
 
         closesocket(client_socket);
+
         return 0;
     }
 
@@ -134,7 +147,9 @@ static unsigned __stdcall handle_client(void *arg)
 
     if (parse_result == -1)
     {
-        printf("Malformed HTTP request.\n");
+        printf(
+            "Malformed HTTP request.\n"
+        );
 
         send_error_response(
             client_socket,
@@ -144,12 +159,15 @@ static unsigned __stdcall handle_client(void *arg)
         );
 
         closesocket(client_socket);
+
         return 0;
     }
 
     if (parse_result == -2)
     {
-        printf("Unsupported HTTP method.\n");
+        printf(
+            "Unsupported HTTP method.\n"
+        );
 
         send_error_response(
             client_socket,
@@ -159,6 +177,7 @@ static unsigned __stdcall handle_client(void *arg)
         );
 
         closesocket(client_socket);
+
         return 0;
     }
 
@@ -174,6 +193,43 @@ static unsigned __stdcall handle_client(void *arg)
         parsed_request.port,
         parsed_request.path
     );
+
+    if (
+        strcmp(
+            parsed_request.method,
+            "GET"
+        ) == 0
+    )
+    {
+        cache_result = cache_get(
+            parsed_request.host,
+            parsed_request.port,
+            parsed_request.path,
+            client_socket
+        );
+
+        if (cache_result == 1)
+        {
+            printf(
+                "Response served from cache.\n"
+            );
+
+            closesocket(client_socket);
+
+            return 0;
+        }
+
+        if (cache_result < 0)
+        {
+            printf(
+                "Cache response failed.\n"
+            );
+
+            closesocket(client_socket);
+
+            return 0;
+        }
+    }
 
     forward_result = forward_http_request(
         client_socket,
@@ -197,7 +253,9 @@ static unsigned __stdcall handle_client(void *arg)
 
     closesocket(client_socket);
 
-    printf("Client connection closed.\n");
+    printf(
+        "Client connection closed.\n"
+    );
 
     return 0;
 }
@@ -220,11 +278,31 @@ int main(void)
         ) != 0
     )
     {
-        printf("WSAStartup failed.\n");
+        printf(
+            "WSAStartup failed.\n"
+        );
+
         return 1;
     }
 
-    printf("Winsock initialized successfully.\n");
+    printf(
+        "Winsock initialized successfully.\n"
+    );
+
+    if (cache_init() != 0)
+    {
+        printf(
+            "Cache initialization failed.\n"
+        );
+
+        WSACleanup();
+
+        return 1;
+    }
+
+    printf(
+        "Cache initialized successfully.\n"
+    );
 
     server_socket = socket(
         AF_INET,
@@ -232,15 +310,22 @@ int main(void)
         IPPROTO_TCP
     );
 
-    if (server_socket == INVALID_SOCKET)
+    if (
+        server_socket == INVALID_SOCKET
+    )
     {
-        printf("Socket creation failed.\n");
+        printf(
+            "Socket creation failed.\n"
+        );
 
         WSACleanup();
+
         return 1;
     }
 
-    printf("TCP socket created successfully.\n");
+    printf(
+        "TCP socket created successfully.\n"
+    );
 
     memset(
         &server_address,
@@ -250,7 +335,9 @@ int main(void)
 
     server_address.sin_family = AF_INET;
     server_address.sin_addr.s_addr = INADDR_ANY;
-    server_address.sin_port = htons(PROXY_PORT);
+    server_address.sin_port = htons(
+        PROXY_PORT
+    );
 
     if (
         bind(
@@ -260,7 +347,9 @@ int main(void)
         ) == SOCKET_ERROR
     )
     {
-        printf("Bind failed.\n");
+        printf(
+            "Bind failed.\n"
+        );
 
         closesocket(server_socket);
         WSACleanup();
@@ -280,7 +369,9 @@ int main(void)
         ) == SOCKET_ERROR
     )
     {
-        printf("Listen failed.\n");
+        printf(
+            "Listen failed.\n"
+        );
 
         closesocket(server_socket);
         WSACleanup();
@@ -288,12 +379,16 @@ int main(void)
         return 1;
     }
 
-    printf("Proxy server is listening...\n");
+    printf(
+        "Proxy server is listening...\n"
+    );
 
     while (1)
     {
         SOCKET client_socket;
+
         ClientContext *context;
+
         unsigned thread_handle;
 
         client_address_length =
@@ -305,9 +400,14 @@ int main(void)
             &client_address_length
         );
 
-        if (client_socket == INVALID_SOCKET)
+        if (
+            client_socket == INVALID_SOCKET
+        )
         {
-            printf("Accept failed.\n");
+            printf(
+                "Accept failed.\n"
+            );
+
             continue;
         }
 
@@ -317,14 +417,20 @@ int main(void)
 
         if (context == NULL)
         {
-            printf("Memory allocation failed.\n");
+            printf(
+                "Memory allocation failed.\n"
+            );
 
             closesocket(client_socket);
+
             continue;
         }
 
-        context->client_socket = client_socket;
-        context->client_address = client_address;
+        context->client_socket =
+            client_socket;
+
+        context->client_address =
+            client_address;
 
         thread_handle = _beginthreadex(
             NULL,
@@ -337,7 +443,9 @@ int main(void)
 
         if (thread_handle == 0)
         {
-            printf("Thread creation failed.\n");
+            printf(
+                "Thread creation failed.\n"
+            );
 
             free(context);
             closesocket(client_socket);
@@ -351,6 +459,7 @@ int main(void)
     }
 
     closesocket(server_socket);
+
     WSACleanup();
 
     return 0;
