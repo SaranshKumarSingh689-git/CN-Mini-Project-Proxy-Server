@@ -1,2 +1,2 @@
 # Blocked domains
-example.com
+# example.com
