@@ -5,7 +5,7 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-
+#include "access_control.h"
 #include "http_parser.h"
 #include "forwarder.h"
 #include "cache.h"
@@ -193,6 +193,25 @@ static unsigned __stdcall handle_client(
         parsed_request.port,
         parsed_request.path
     );
+    if (is_domain_blocked(parsed_request.host))
+{
+    printf(
+        "ACCESS DENIED: %s%s\n",
+        parsed_request.host,
+        parsed_request.path
+    );
+
+    send_error_response(
+        client_socket,
+        403,
+        "Forbidden",
+        "Access to this domain is blocked by the proxy.\r\n"
+    );
+
+    closesocket(client_socket);
+
+    return 0;
+}
 
     if (
         strcmp(
